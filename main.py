@@ -27,6 +27,7 @@ class Data:
         words (set): A set of valid words loaded from the 'words.txt' file.
     """
     with open('words.txt', 'r') as f: words = set(word.strip().lower() for word in f.readlines())
+    
 
     SUCCESS: int = 0
     INFO: int = 1
@@ -85,7 +86,7 @@ class wordbombGame:
 
         self.timeStageRelation: dict[int, int] = {1: 8, 2: 7, 3: 6, 4: 5, 5: 4, 6: 3, 7: 2}
         self.stageStartersRelation: dict[int, list] = {
-            i: [word[i - 1] for word in Data.words if len(word) > i - 1] for i in range(1, 8)
+            i-1: [word[:i-1] for word in Data.words if len(word[:i-1]) > 0] for i in range(0, 8)
         }
         
         self.players: list[Player] = [Player(userID, "Owner")]
@@ -140,7 +141,7 @@ def update_embed(Game, nextup: int) -> nextcord.Embed:
     embed.add_field(name="Stage", value=Game.stage)
     embed.add_field(name="Plays", value=Game.plays)
     embed.add_field(name="Next Up", value=f"<@{nextup}>")
-    embed.add_field(name="Time remaining", value=f"{int(Game.timeRemaining)} seconds")
+    embed.add_field(name="Time", value=f"{int(Game.timeRemaining)} seconds")
     return embed
 
 async def startGame(Game) -> None:
@@ -163,13 +164,13 @@ async def startGame(Game) -> None:
             await sleep(0.1)
             Game.timeRemaining -= 0.1
             if not Game.running: gameOver(Game, forced=True); break
-            if Game.timeRemaining % 1 == 0.0:
-                embed = await update_embed(Game, nextup=nextup)
+            if round(Game.timeRemaining, 1) in [1,2,3,5,7,9]:
+                embed = update_embed(Game, nextup=nextup)
                 await Game.main_msg.edit(embed=embed)
             if Game.timeRemaining <= 0:
                 Game.players[Game.currentPlayerIndex].hearts -= 1
                 await Game.main_msg.edit(content=f"<@{nextup}> lost a life! {Game.players[Game.currentPlayerIndex].hearts} life remaining")
-                await sleep(2)
+                await sleep(1)
                 break
 
         if Game.responded:
@@ -198,7 +199,9 @@ async def startGame(Game) -> None:
             await gameOver(Game)
             break
 
-        await Game.response.delete()
+        if Game.response: 
+            await Game.response.delete()
+
         Game.stage = min(7, (Game.plays // 10) + 1)
         Game.timeRemaining = Game.timeStageRelation[Game.stage]
         Game.currentStarter = choice(Game.stageStartersRelation[Game.stage])
@@ -226,7 +229,7 @@ async def startGameCountdown(interaction: nextcord.Interaction) -> None:
             if interaction.user.id != game.userID:
                 return await interaction.response.send_message(f"This game is being hosted by <@{game.userID}>!", ephemeral=True)
 
-            game.stage == 1
+            game.stage = 1
             embed: nextcord.Embed = nextcord.Embed(title="Game starting...", description="Game will start in **{}**".format(game.countdown))
             embed.add_field(name="Rule #1", value="Answers must be greater than or equal to 2 in length")
             embed.add_field(name="Rule #2", value="Answers must not be repeated")
@@ -387,7 +390,7 @@ async def stopgame(interaction: nextcord.Interaction) -> nextcord.Message:
     if interaction.user.id in currentGame: 
         currentGame = games[interaction.user.id]
     else:
-        return await interaction.response.send_message(content="You have no running games.",ephemeral=True)    
+        return await interaction.response.send_message(content="You have no running games.",ephemeral=True)
     if not currentGame:
         return await interaction.response.send_message("You have no ongoing games!")
 
