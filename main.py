@@ -5,13 +5,15 @@ This script implements a Discord bot using the nextcord library. The bot allows 
 import nextcord
 from nextcord.ext import commands
 from nextcord.ui import Button, View
-import random, asyncio
-import signal
-import os
+from random import randint, choice
+from asyncio import sleep, get_running_loop
+from signal import signal, SIGINT
+from os import getenv
 from dotenv import load_dotenv
+from colorama import Fore
 
 load_dotenv()
-TOKEN: str = os.getenv('DISCORD_TOKEN')
+TOKEN: str = getenv('DISCORD_TOKEN')
 bot = commands.Bot(command_prefix="!", intents=nextcord.Intents.all())
 
 global games
@@ -25,6 +27,12 @@ class Data:
         words (set): A set of valid words loaded from the 'words.txt' file.
     """
     with open('words.txt', 'r') as f: words = set(word.strip().lower() for word in f.readlines())
+
+    SUCCESS: int = 0
+    INFO: int = 1
+    WARNING: int = 2
+    ERROR: int = 3
+    LogTypeToLog: dict[int, tuple[str, str]] = {0:("SUCCESS",Fore.GREEN), 1:("INFO",Fore.CYAN),2:("WARNING",Fore.YELLOW),3:("ERROR",Fore.RED)}
 
 class Player:
     """
@@ -68,16 +76,21 @@ class wordbombGame:
     def __init__(self, userID: int, channelID: int) -> None:
         self.userID: int = userID
         self.channelID: int = channelID
-        self.gameID: int = random.randint(1, 999999)
-        self.stage: int = 1
+        self.gameID: int = randint(1, 999999)
+        self.stage: int = 0
         self.plays: int = 0
         self.countdown: int = 10
         self.currentPlayerIndex: int = 0
         self.timeRemaining: int = 8
+
+        self.timeStageRelation: dict[int, int] = {1: 8, 2: 7, 3: 6, 4: 5, 5: 4, 6: 3, 7: 2}
+        self.stageStartersRelation: dict[int, list] = {
+            i: [word[i - 1] for word in Data.words if len(word) > i - 1] for i in range(1, 8)
+        }
         
         self.players: list[Player] = [Player(userID, "Owner")]
         self.used_words: set = set()
-        self.currentStarter: str = random.choice(Data.easy_starters)
+        self.currentStarter: str = choice(self.stageStartersRelation[1])
         
         self.running: bool = True
         self.responded: bool = False
@@ -87,12 +100,11 @@ class wordbombGame:
         self.join_msg: nextcord.Message = None
         self.main_msg: nextcord.Message = None
 
-        self.timeStageRelation: dict[int, int] = {1: 8, 2: 7, 3: 6, 4: 5, 5: 4, 6: 3, 7: 2}
-        self.stageStartersRelation: dict[int, list] = {
-            i: [word[i - 1] for word in Data.words if len(word) > i - 1] for i in range(1, 8)
-        }
+async def log(Type: int, Warning: str):
+    TypeStr, Color = Data.LogTypeToLog[Type]
+    print(Color + f"[{TypeStr}] {Warning}" + Fore.RESET)
 
-async def gameOver(Game) -> None:
+async def gameOver(Game, forced: bool = False) -> None:
     """
     Ends the game and displays the game statistics.
 
@@ -107,12 +119,13 @@ async def gameOver(Game) -> None:
 
     await Game.main_msg.delete()
     channel: nextcord.TextChannel = bot.get_channel(Game.channelID)
-    await channel.send(content="Game over!", embed=embed)
+    if not forced: await channel.send(content="Game over!", embed=embed)
+    else: await channel.send(content="Game was stopped by host", embed=embed)
     await Game.join_msg.delete()
     
     Game.running = False
 
-def update_embed(Game, nextup) -> nextcord.Embed:
+def update_embed(Game, nextup: int) -> nextcord.Embed:
     """
     Updates the game embed with the current game state.
 
@@ -147,12 +160,16 @@ async def startGame(Game) -> None:
         await Game.main_msg.edit(content=f"<@{nextup}>", embed=embed)
 
         while not Game.responded:
-            await asyncio.sleep(0.1)
+            await sleep(0.1)
             Game.timeRemaining -= 0.1
+            if not Game.running: gameOver(Game, forced=True); break
+            if Game.timeRemaining % 1 == 0.0:
+                embed = await update_embed(Game, nextup=nextup)
+                await Game.main_msg.edit(embed=embed)
             if Game.timeRemaining <= 0:
                 Game.players[Game.currentPlayerIndex].hearts -= 1
                 await Game.main_msg.edit(content=f"<@{nextup}> lost a life! {Game.players[Game.currentPlayerIndex].hearts} life remaining")
-                await asyncio.sleep(2)
+                await sleep(2)
                 break
 
         if Game.responded:
@@ -164,7 +181,7 @@ async def startGame(Game) -> None:
                 await Game.response.add_reaction("❌")
                 Game.players[Game.currentPlayerIndex].hearts -= 1
                 await Game.main_msg.edit(content=f"<@{nextup}> lost a life! {Game.players[Game.currentPlayerIndex].hearts} life remaining")
-                await asyncio.sleep(2)
+                await sleep(2)
             else:
                 Game.used_words.add(response_content)
                 Game.plays = Game.plays + 1
@@ -174,17 +191,18 @@ async def startGame(Game) -> None:
             Game.players.pop(Game.currentPlayerIndex)
             if Game.currentPlayerIndex >= len(Game.players):
                 Game.currentPlayerIndex = 0
-            await asyncio.sleep(2)
+            await sleep(2)
 
         if len(Game.players) == 1 and not Game.singleplayer:
             await Game.main_msg.edit(content=f"<@{Game.players[0].id}> wins!")
             await gameOver(Game)
             break
 
+        await Game.response.delete()
         Game.stage = min(7, (Game.plays // 10) + 1)
         Game.timeRemaining = Game.timeStageRelation[Game.stage]
-        Game.currentStarter = random.choice(Game.stageStartersRelation[Game.stage])
-        Game.currentPlayerIndex = (Game.currentPlayerIndex + 1) % len(Game.players)
+        Game.currentStarter = choice(Game.stageStartersRelation[Game.stage])
+        Game.currentPlayerIndex = 0 if len(Game.players) <= Game.currentPlayerIndex + 1 else Game.currentPlayerIndex + 1
         Game.response, Game.responded = None, False
 
 async def startGameCountdown(interaction: nextcord.Interaction) -> None:
@@ -196,24 +214,31 @@ async def startGameCountdown(interaction: nextcord.Interaction) -> None:
     """
     gameID = interaction.data["custom_id"]
     for game in games.values():
+        if (game.channelID == interaction.channel_id) and (game.userID != interaction.user.id):
+            await log(Data.WARNING, f"User({interaction.user.id}) tried to start a game in <#{interaction.channel_id}> where User({game.userID}) was already playing!")
+            return await interaction.response.send_message(f"Game already started in <#{game.channelID}>!", ephemeral=True)
         if f"{game.gameID}###" == gameID:
             if len(game.players) == 1:
                 game.singleplayer = True
             if game.stage == 1:
+                await log(Data.WARNING, f"User({interaction.user.id}) tried to start a game in <#{interaction.channel_id}> where the selected game was already playing!")
                 return await interaction.response.send_message(f"Game already started in <#{game.channelID}>!", ephemeral=True)
             if interaction.user.id != game.userID:
                 return await interaction.response.send_message(f"This game is being hosted by <@{game.userID}>!", ephemeral=True)
 
+            game.stage == 1
             embed: nextcord.Embed = nextcord.Embed(title="Game starting...", description="Game will start in **{}**".format(game.countdown))
             embed.add_field(name="Rule #1", value="Answers must be greater than or equal to 2 in length")
             embed.add_field(name="Rule #2", value="Answers must not be repeated")
             game.main_msg = await interaction.response.send_message(embed=embed)
 
-            for _ in range(5):
-                await asyncio.sleep(1)
+            for _ in range(10):
+                await sleep(1)
                 game.countdown -= 1
-                embed.description = f"Game will start in **{game.countdown}**"
-                await game.main_msg.edit(embed=embed)
+                if not game.running: gameOver(game, forced=True); break
+                if _ % 2 == 0:
+                    embed.description = f"Game will start in **{game.countdown}**"
+                    await game.main_msg.edit(embed=embed)
 
             await startGame(game)
             break
@@ -285,7 +310,7 @@ def shutdown_handler(signal, frame) -> None:
         frame: The current stack frame.
     """
     print("Shutting down...")
-    loop = asyncio.get_running_loop()
+    loop = get_running_loop()
     loop.stop()
 
 @bot.event
@@ -294,6 +319,7 @@ async def on_ready() -> None:
     Event handler for when the bot is ready.
     """
     print(f"Bot is online as {bot.user}")
+    await bot.sync_all_application_commands()
 
 @bot.event
 async def on_message(message: nextcord.Message) -> None:
@@ -309,9 +335,12 @@ async def on_message(message: nextcord.Message) -> None:
                 if game.players[game.currentPlayerIndex].id == message.author.id:
                     game.responded = True
                     game.response = message
+            elif not message.author.bot:
+                await sleep(10)
+                await message.delete()
 
 @bot.slash_command(description="Start your own Wordbomb game")
-async def play(interaction: nextcord.Interaction) -> nextcord.Message:
+async def wordbomb(interaction: nextcord.Interaction) -> nextcord.Message:
     """
     Slash command to start a Wordbomb game.
 
@@ -340,7 +369,7 @@ async def randomword(interaction: nextcord.Interaction) -> nextcord.Message:
     Returns:
         nextcord.Message: The message sent to the user.
     """
-    random_word = random.choice(list(Data.words))
+    random_word = choice(list(Data.words))
     embed = nextcord.Embed(title="Random Word", description=random_word, color=nextcord.colour.Color.green())
     return await interaction.response.send_message(embed=embed)
 
@@ -355,12 +384,16 @@ async def stopgame(interaction: nextcord.Interaction) -> nextcord.Message:
     Returns:
         nextcord.Message: The message sent to the user.
     """
-    currentGame = games[interaction.user.id]
+    if interaction.user.id in currentGame: 
+        currentGame = games[interaction.user.id]
+    else:
+        return await interaction.response.send_message(content="You have no running games.",ephemeral=True)    
     if not currentGame:
         return await interaction.response.send_message("You have no ongoing games!")
 
     del games[interaction.user.id]
-    return await currentGame.main_msg.edit(content="This game was stopped by the host.")
+    await currentGame.main_msg.edit(content="This game was stopped by the host.")
+    return await interaction.response.send_message(content="All games related to you were stopped.",ephemeral=True)
 
-signal.signal(signal.SIGINT, shutdown_handler)
+signal(SIGINT, shutdown_handler)
 bot.run(TOKEN)
